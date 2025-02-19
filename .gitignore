@@ -1,8 +1,67 @@
-venv/
-.env
-.DS_Store
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
 db/
 logs/
 output/
+.cursor/
+.env
+
+# Data and models
+db/raw/
+db/processed/
+output/models/
+output/backtests/
+output/plots/
+output/signals/
+output/features/
+
+# Documentation
+docs/_build/
+end-to-end structure.md
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Distribution
+*.tar.gz
+*.whl
