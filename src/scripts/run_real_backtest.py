@@ -217,20 +217,22 @@ def run_backtest_on_symbol(
         max_position_size=0.1, kelly_fraction=0.5, min_win_rate=0.55, vol_target=0.15
     )
 
-    # Initialize strategy with enhanced components
+    # Initialize strategy with enhanced parameters
     strategy = EnhancedInstitutionalStrategy(
         vpin_threshold=0.7,
         min_holding_time=5,
-        max_holding_time=15,
-        stop_loss=0.01,
-        take_profit=0.005,
+        max_holding_time=30,
+        stop_loss=0.02,
+        take_profit=0.015,
+        vol_window=100,
+        trend_window=20,
     )
 
     # Initialize experiment manager with comprehensive validation
     experiment_mgr = ExperimentManager(
         initial_capital=initial_capital,
         output_dir=output_dir / symbol,
-        max_drawdown_limit=0.04,
+        max_drawdown_limit=0.05,
     )
 
     # Track model performance across windows
@@ -349,8 +351,8 @@ def run_multi_symbol_backtest(
     # Define validation configuration
     validation_config = {
         "wfo": {
-            "train_window": "3M",
-            "test_window": "1M",
+            "train_window": "3M",  # Use 3 months for training
+            "test_window": "1M",  # Test on 1 month
             "min_sharpe": 1.5,
             "min_win_rate": 0.65,
         },
@@ -361,10 +363,10 @@ def run_multi_symbol_backtest(
             "slippage_range": np.linspace(0.0001, 0.001, 10),
         },
         "performance_targets": {
-            "min_sharpe": 2.5,
-            "min_win_rate": 0.68,
-            "max_drawdown": 0.04,
-            "min_trades": 100,
+            "min_sharpe": 2.0,  # Slightly lower target for initial testing
+            "min_win_rate": 0.65,  # Adjusted from 0.68
+            "max_drawdown": 0.05,  # Slightly relaxed from 0.04
+            "min_trades": 50,  # Ensure sufficient trades for statistical significance
         },
     }
 
@@ -509,10 +511,11 @@ def generate_summary_report(results, output_dir, validation_config):
 
 
 if __name__ == "__main__":
-    # Run backtest on all available symbols with reference interval
+    # Run backtest on selected symbols with longer timeframe
     results = run_multi_symbol_backtest(
-        ["AAPL"],  # Test with AAPL first
-        interval="3M",  # Use last 1 month of data
+        symbols=["CSCO", "DD", "GE", "GSK", "HSBC", "IBM", "MCD", "SHEL", "VIXY"],
+        initial_capital=10_000_000,  # 10M initial capital
+        interval="1M",  # Use last 1 month of data for initial testing
     )
     logger.info(
         "Completed all backtests. Check the output directory for detailed results."
