@@ -23,11 +23,10 @@ class EnhancedInstitutionalStrategy(BaseStrategy):
         self,
         vpin_threshold: float = 0.7,
         min_holding_time: int = 5,  # minutes
-        max_holding_time: int = 30,  # minutes
-        stop_loss: float = 0.02,  # 2% stop loss
-        take_profit: float = 0.015,  # 1.5% target return
+        max_holding_time: int = 15,  # minutes
+        stop_loss: float = 0.01,  # Tighter 1% stop loss
+        take_profit: float = 0.005,  # 0.5% target return
         vol_window: int = 100,  # window for volatility calculation
-        trend_window: int = 20,  # window for trend calculation
     ):
         self.vpin_threshold = vpin_threshold
         self.min_holding_time = min_holding_time
@@ -35,11 +34,9 @@ class EnhancedInstitutionalStrategy(BaseStrategy):
         self.stop_loss = stop_loss
         self.take_profit = take_profit
         self.vol_window = vol_window
-        self.trend_window = trend_window
         self._vol_ma = None  # Cache for volatility moving average
         self.trades = []  # Store completed trades
         self.active_trade = None  # Store current active trade
-        self.max_position_size = 0.25  # Maximum position size (25% of portfolio)
 
     def generate_signals(self, data: pd.DataFrame) -> pd.Series:
         """
@@ -53,102 +50,23 @@ class EnhancedInstitutionalStrategy(BaseStrategy):
         """
         signals = pd.Series(0, index=data.index)
 
-        # Calculate trend using multiple timeframes
-        ma_fast = data["close"].rolling(10).mean()
-        ma_slow = data["close"].rolling(30).mean()
-        trend = (ma_fast > ma_slow).astype(int)
-
-        # VPIN conditions
-        vpin_rising = data["vpin"].diff(5) > 0
-        vpin_high = data["vpin"] > self.vpin_threshold
-
-        # Volume conditions
-        volume_ma = data["volume"].rolling(20).mean()
-        vol_surge = data["volume"] > volume_ma * 1.5
-
-        # Volatility conditions
-        vol_ma = data["daily_volatility"].rolling(self.vol_window).mean()
-        low_vol = data["daily_volatility"] < vol_ma
-
-        # Market impact conditions
-        low_impact = (
+        # Calculate entry conditions
+        vpin_condition = data["vpin"] > self.vpin_threshold
+        volatility_condition = (
+            data["daily_volatility"] < data["daily_volatility"].mean()
+        )
+        impact_condition = (
             data.get("market_impact_pred", pd.Series(0, index=data.index)) < 0.01
         )
 
-        # Generate long signals
-        long_condition = (
-            vpin_high & vpin_rising & vol_surge & (trend == 1) & low_vol & low_impact
-        )
-
-        # Generate short signals
-        short_condition = (
-            vpin_high & vpin_rising & vol_surge & (trend == 0) & low_vol & low_impact
-        )
-
-        signals[long_condition] = 1
-        signals[short_condition] = -1
+        # Generate signals
+        entry_condition = vpin_condition & volatility_condition & impact_condition
+        signals[entry_condition] = 1
 
         # Update volatility MA
-        self._vol_ma = vol_ma
+        self._vol_ma = data["daily_volatility"].rolling(self.vol_window).mean()
 
         return signals
-
-    def size_position(self, signal: float, data: pd.Series) -> float:
-        """
-        Calculate position size based on market conditions.
-
-        Args:
-            signal: Trading signal
-            data: Current market data
-
-        Returns:
-            Position size as fraction of portfolio
-        """
-        if abs(signal) == 0:
-            return 0.0
-
-        # Base size (25% max position)
-        base_size = self.max_position_size
-
-        # VPIN factor
-        vpin_factor = np.clip(data["vpin"] / self.vpin_threshold, 0.5, 2.0)
-
-        # Trend strength adjustment
-        # Calculate returns using log returns instead of pct_change
-        trend_strength = abs(data["log_returns"] / data["daily_volatility"])
-        trend_factor = np.clip(trend_strength, 0.5, 2.0)
-
-        # Volume-based adjustment
-        volume_ma = (
-            data["volume"].rolling(20).mean().iloc[-1]
-            if isinstance(data["volume"], pd.Series)
-            else data["volume"]
-        )
-        volume_ratio = data["volume"] / volume_ma
-        volume_factor = np.clip(volume_ratio, 0.5, 2.0)
-
-        # Volatility adjustment
-        vol_factor = 1.0
-        if "daily_volatility" in data:
-            vol_factor = 1.0 / (1.0 + 3.0 * data["daily_volatility"])
-
-        # Market impact adjustment
-        impact_factor = 1.0
-        if "market_impact_pred" in data:
-            impact_factor = 1.0 / (1.0 + 3.0 * data["market_impact_pred"])
-
-        # Calculate final size with all adjustments
-        size = (
-            base_size
-            * vpin_factor
-            * trend_factor
-            * volume_factor
-            * vol_factor
-            * impact_factor
-        )
-
-        # Cap at maximum position size
-        return min(size, self.max_position_size)
 
     def should_exit(self, data: pd.Series, trade: Trade) -> bool:
         """
@@ -171,32 +89,19 @@ class EnhancedInstitutionalStrategy(BaseStrategy):
         # Calculate returns
         returns = (data["close"] - trade.entry_price) / trade.entry_price
 
-        # Dynamic stop loss based on volatility
-        dynamic_stop = max(self.stop_loss, 2.0 * data["daily_volatility"])
-
-        # Dynamic take profit based on VPIN
-        dynamic_profit = max(
-            self.take_profit, self.take_profit * data["vpin"] / self.vpin_threshold
-        )
-
         # Exit conditions
-        stop_loss_hit = returns < -dynamic_stop
-        take_profit_hit = returns > dynamic_profit
+        stop_loss_hit = returns < -self.stop_loss
+        take_profit_hit = returns > self.take_profit
         max_time_exceeded = holding_time > self.max_holding_time
         min_time_met = holding_time >= self.min_holding_time
 
-        # Trend reversal exit (using log returns instead of pct_change)
-        trend_reversal = (
-            data["log_returns"] * np.sign(trade.quantity) < 0 and min_time_met
-        )
-
         # VPIN-based exit
-        vpin_exit = data["vpin"] < self.vpin_threshold * 0.8 and min_time_met
+        vpin_exit = data["vpin"] < self.vpin_threshold and min_time_met
 
-        # Volatility spike exit
+        # Volatility-based exit (using cached MA)
         vol_exit = (
             self._vol_ma is not None
-            and data["daily_volatility"] > self._vol_ma.iloc[-1] * 1.5
+            and data["daily_volatility"] > self._vol_ma.iloc[-1]
             and min_time_met
         )
 
@@ -204,8 +109,50 @@ class EnhancedInstitutionalStrategy(BaseStrategy):
             stop_loss_hit
             or take_profit_hit
             or max_time_exceeded
-            or (min_time_met and (trend_reversal or vpin_exit or vol_exit))
+            or (min_time_met and (vpin_exit or vol_exit))
         )
+
+    def size_position(self, signal: float, data: pd.Series) -> float:
+        """
+        Calculate position size based on market conditions.
+
+        Args:
+            signal: Trading signal
+            data: Current market data
+
+        Returns:
+            Position size as fraction of portfolio
+        """
+        if abs(signal) == 0:
+            return 0.0
+
+        # Ultra-conservative base size
+        base_size = 0.1  # Start with 10% max position
+
+        # Adjust for VPIN with conservative scaling
+        vpin_factor = min(0.5 * data["vpin"] / self.vpin_threshold, 0.8)
+
+        # Conservative volatility adjustment
+        vol_factor = 1.0
+        if "daily_volatility" in data:
+            vol_factor = 1.0 / (1.0 + 5.0 * data["daily_volatility"])
+
+        # Conservative impact adjustment
+        impact_factor = 1.0
+        if "market_impact_pred" in data:
+            impact_factor = 1.0 / (1.0 + 5.0 * data["market_impact_pred"])
+
+        # Volume-based adjustment
+        volume_factor = 1.0
+        if "volume" in data and "avg_volume" in data:
+            # Significantly reduce size when volume is low
+            volume_factor = min(0.8, np.power(data["volume"] / data["avg_volume"], 0.3))
+
+        # Calculate final size with all adjustments
+        size = base_size * vpin_factor * vol_factor * impact_factor * volume_factor
+
+        # Ultra-conservative maximum position size
+        return min(size, 0.1)  # Cap at 10% of portfolio
 
     def calculate_regime(self, data: pd.DataFrame) -> str:
         """
@@ -239,32 +186,25 @@ class EnhancedInstitutionalStrategy(BaseStrategy):
         Args:
             performance_metrics: Dictionary of performance metrics
         """
-        # Adjust VPIN threshold based on win rate
-        if performance_metrics["win_rate"] < 0.65:
+        # Adjust VPIN threshold
+        if performance_metrics["win_rate"] < 0.68:
             self.vpin_threshold = min(self.vpin_threshold + 0.05, 0.9)
+        elif performance_metrics["sharpe_ratio"] < 2.5:
+            self.vpin_threshold = min(self.vpin_threshold + 0.02, 0.9)
 
-        # Adjust position size based on Sharpe ratio
-        if performance_metrics["sharpe_ratio"] < 1.5:
-            self.max_position_size *= 0.9  # Reduce by 10%
-        elif performance_metrics["sharpe_ratio"] > 2.5:
-            self.max_position_size = min(
-                self.max_position_size * 1.1, 0.25
-            )  # Increase by 10%
+        # Adjust holding times
+        avg_duration = performance_metrics.get("avg_trade_duration", 0)
+        if avg_duration < 10:
+            self.min_holding_time = max(5, self.min_holding_time - 1)
+        elif avg_duration > 30:
+            self.max_holding_time = min(40, self.max_holding_time + 2)
 
-        # Adjust holding times based on average return
-        avg_return = performance_metrics.get("avg_trade_return", 0)
-        if avg_return < 0:
-            self.max_holding_time = max(10, self.max_holding_time - 5)
-        elif avg_return > self.take_profit:
-            self.max_holding_time = min(45, self.max_holding_time + 5)
-
-        # Adjust take profit based on volatility
-        if "avg_volatility" in performance_metrics:
-            self.take_profit = max(0.01, 2.0 * performance_metrics["avg_volatility"])
+        # Adjust take profit based on average return
+        if performance_metrics["avg_trade_return"] < 0.0075:
+            self.take_profit = min(self.take_profit * 1.1, 0.01)
 
         logger.info(
             f"Updated parameters: VPIN={self.vpin_threshold:.2f}, "
-            f"Max Size={self.max_position_size:.2%}, "
             f"Hold={self.min_holding_time}-{self.max_holding_time}min, "
             f"TP={self.take_profit:.2%}"
         )
