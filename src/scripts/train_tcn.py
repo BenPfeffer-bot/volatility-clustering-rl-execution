@@ -273,8 +273,8 @@ def main():
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Get available tickers
-    # tickers = get_available_tickers()
-    tickers = ["AAPL"]
+    tickers = get_available_tickers()
+    # tickers = ["AAPL"]
     logger.info(f"Found {len(tickers)} tickers with processed data")
 
     # Configure parallel processing

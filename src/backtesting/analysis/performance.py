@@ -62,54 +62,65 @@ class PerformanceAnalyzer:
         if len(portfolio_values) < 2:
             return self._empty_metrics()
 
-        # Calculate returns
+        # Calculate returns with proper handling of empty slices
         returns = portfolio_values.pct_change().dropna()
         if len(returns) == 0:
             return self._empty_metrics()
 
-        # Calculate basic metrics
-        total_return = (portfolio_values.iloc[-1] / portfolio_values.iloc[0]) - 1
-        volatility = returns.std() * np.sqrt(252)  # Annualized
+        # Calculate basic metrics with validation
+        try:
+            total_return = (portfolio_values.iloc[-1] / portfolio_values.iloc[0]) - 1
+            volatility = returns.std() * np.sqrt(252) if len(returns) > 1 else 0.0
+        except (IndexError, ZeroDivisionError):
+            return self._empty_metrics()
 
-        # Calculate Sharpe ratio (avoid division by zero)
-        excess_returns = returns - self.risk_free_rate / 252
-        sharpe_ratio = 0.0
-        if volatility > 0:
-            sharpe_ratio = (excess_returns.mean() * 252) / volatility
+        # Calculate Sharpe ratio with validation
+        try:
+            excess_returns = returns - self.risk_free_rate / 252
+            sharpe_ratio = 0.0
+            if volatility > 0 and len(excess_returns) > 0:
+                sharpe_ratio = (np.nanmean(excess_returns) * 252) / volatility
+        except (ValueError, ZeroDivisionError):
+            sharpe_ratio = 0.0
 
-        # Calculate Sortino ratio
-        downside_returns = returns[returns < 0]
-        sortino_ratio = 0.0
-        if len(downside_returns) > 0:
-            downside_vol = np.sqrt(np.mean(downside_returns**2)) * np.sqrt(252)
-            if downside_vol > 0:
-                sortino_ratio = (excess_returns.mean() * 252) / downside_vol
+        # Calculate Sortino ratio with validation
+        try:
+            downside_returns = returns[returns < 0]
+            sortino_ratio = 0.0
+            if len(downside_returns) > 0:
+                downside_vol = np.sqrt(np.nanmean(downside_returns**2)) * np.sqrt(252)
+                if downside_vol > 0:
+                    sortino_ratio = (np.nanmean(excess_returns) * 252) / downside_vol
+        except (ValueError, ZeroDivisionError):
+            sortino_ratio = 0.0
 
-        # Calculate trade-based metrics
+        # Calculate trade-based metrics with validation
         completed_trades = [t for t in trades if t.exit_time is not None]
         win_rate = 0.0
         avg_trade_return = 0.0
         profit_factor = 0.0
 
         if completed_trades:
-            winning_trades = [t for t in completed_trades if t.pnl > 0]
-            win_rate = len(winning_trades) / len(completed_trades)
+            try:
+                winning_trades = [t for t in completed_trades if t.pnl > 0]
+                win_rate = len(winning_trades) / len(completed_trades)
 
-            total_profit = sum(t.pnl for t in winning_trades)
-            total_loss = abs(sum(t.pnl for t in completed_trades if t.pnl < 0))
+                total_profit = sum(t.pnl for t in winning_trades)
+                total_loss = abs(sum(t.pnl for t in completed_trades if t.pnl < 0))
 
-            avg_trade_return = sum(t.pnl for t in completed_trades) / len(
-                completed_trades
-            )
+                if len(completed_trades) > 0:
+                    avg_trade_return = sum(t.pnl for t in completed_trades) / len(
+                        completed_trades
+                    )
 
-            if total_loss > 0:
-                profit_factor = total_profit / total_loss
-            elif total_profit > 0:
-                profit_factor = float("inf")
-            else:
-                profit_factor = 0.0
+                if total_loss > 0:
+                    profit_factor = total_profit / total_loss
+                elif total_profit > 0:
+                    profit_factor = float("inf")
+            except (ValueError, ZeroDivisionError):
+                pass
 
-        return {
+        metrics = {
             "total_return": total_return,
             "sharpe_ratio": sharpe_ratio,
             "sortino_ratio": sortino_ratio,
@@ -119,6 +130,9 @@ class PerformanceAnalyzer:
             "profit_factor": profit_factor,
             "total_trades": len(completed_trades),
         }
+
+        # Replace any NaN values with 0.0
+        return {k: 0.0 if np.isnan(v) else v for k, v in metrics.items()}
 
     def _empty_metrics(self) -> Dict:
         """Return empty metrics dictionary with default values."""

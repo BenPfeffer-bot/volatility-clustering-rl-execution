@@ -651,3 +651,62 @@ class MarketImpactPredictor:
         self.num_channels = checkpoint["num_channels"]
         self.kernel_size = checkpoint["kernel_size"]
         logger.info(f"Model loaded from {path}")
+
+    def evaluate(self, data: pd.DataFrame) -> float:
+        """
+        Evaluate model performance on given data.
+
+        Args:
+            data: DataFrame with features
+
+        Returns:
+            Mean squared error of predictions
+        """
+        if data.empty:
+            logger.warning("Empty data provided for evaluation")
+            return 0.0
+
+        self.model.eval()  # Set model to evaluation mode
+
+        try:
+            # Prepare sequences
+            X, y = self.prepare_sequences(data)
+            if X is None or y is None or X.shape[0] == 0 or y.shape[0] == 0:
+                logger.warning("No valid sequences could be prepared for evaluation")
+                return 0.0
+
+            X = X.to(self.device)
+            y = y.to(self.device)
+
+            with torch.no_grad():
+                if self.use_amp:
+                    with torch.autocast(
+                        device_type=self.device.type, dtype=self.amp_dtype
+                    ):
+                        y_pred = self.model(X)
+                else:
+                    y_pred = self.model(X)
+
+                # Convert predictions to numpy and handle NaN values
+                y_pred = y_pred.cpu().numpy()
+                y_true = y.cpu().numpy()
+
+                # Remove any NaN values
+                mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
+                if not np.any(mask):
+                    logger.warning("All predictions or true values are NaN")
+                    return 0.0
+
+                y_true = y_true[mask]
+                y_pred = y_pred[mask]
+
+                if len(y_true) == 0:
+                    logger.warning("No valid samples after removing NaN values")
+                    return 0.0
+
+                mse = np.mean((y_true - y_pred) ** 2)
+                return float(mse) if not np.isnan(mse) and not np.isinf(mse) else 0.0
+
+        except Exception as e:
+            logger.error(f"Error during model evaluation: {e}")
+            return 0.0

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from ..strategies.base import BaseStrategy
 from ..core.engine import BacktestEngine
 from ..performance.metrics import PerformanceMetrics
+from src.models.tcn_impact import MarketImpactPredictor
 from src.utils.log_utils import setup_logging
 
 logger = setup_logging(__name__)
@@ -21,6 +22,7 @@ class WalkForwardOptimizer:
     - Uses rolling windows for training and testing
     - Prevents overfitting through out-of-sample validation
     - Tracks performance stability across time periods
+    - Retrains TCN model for each window
     """
 
     def __init__(
@@ -35,6 +37,7 @@ class WalkForwardOptimizer:
         self.min_sharpe = min_sharpe
         self.min_win_rate = min_win_rate
         self.results_history: List[Dict] = []
+        self.tcn_model = MarketImpactPredictor()
 
     def run_wfo(
         self,
@@ -75,6 +78,14 @@ class WalkForwardOptimizer:
             train_data = data[train_start:train_end]
             test_data = data[train_end:test_end]
 
+            # Retrain TCN model on training data
+            logger.info(f"Retraining TCN model for window starting {start_date}")
+            self.tcn_model.train(train_df=train_data, epochs=25)
+
+            # Update market impact predictions
+            train_data["market_impact_pred"] = self.tcn_model.predict(train_data)
+            test_data["market_impact_pred"] = self.tcn_model.predict(test_data)
+
             # Optimize on training data
             best_params = self._optimize_window(strategy, train_data, parameter_ranges)
 
@@ -88,6 +99,10 @@ class WalkForwardOptimizer:
                 "train_metrics": train_results["train_metrics"],
                 "test_metrics": test_results["test_metrics"],
                 "parameters": best_params,
+                "tcn_performance": {
+                    "train_mse": self.tcn_model.evaluate(train_data),
+                    "test_mse": self.tcn_model.evaluate(test_data),
+                },
             }
 
             # Extract key metrics for convenience
@@ -135,24 +150,77 @@ class WalkForwardOptimizer:
         Returns:
             Dict of optimized parameters
         """
+        if data.empty:
+            logger.warning("Empty data provided for window optimization")
+            return {
+                name: (low + high) / 2 for name, (low, high) in parameter_ranges.items()
+            }
+
         from ..optimization.bayesian import BayesianOptimizer
 
-        # Initialize optimizer
-        optimizer = BayesianOptimizer(param_bounds=parameter_ranges, n_iterations=50)
+        # Initialize optimizer with improved kernel parameters
+        optimizer = BayesianOptimizer(
+            param_bounds=parameter_ranges,
+            n_iterations=50,
+            exploration_weight=0.1,
+            kernel_params={
+                "length_scale": 1.0,
+                "length_scale_bounds": (0.01, 100.0),
+                "constant_value": 1.0,
+                "constant_value_bounds": (0.01, 100.0),
+                "noise": 1e-4,
+            },
+        )
 
-        # Define evaluation function
+        # Define evaluation function with validation
         def evaluate_params(params):
-            # Update strategy parameters
-            for name, value in params.items():
-                setattr(strategy, name, value)
+            try:
+                # Update strategy parameters
+                for name, value in params.items():
+                    setattr(strategy, name, value)
 
-            # Run backtest
-            engine = BacktestEngine(strategy=strategy)
-            results = engine.run_backtest(data)
+                # Run backtest
+                engine = BacktestEngine(strategy=strategy)
+                results = engine.run_backtest(data)
 
-            # Calculate metrics
-            metrics = PerformanceMetrics(results["trades"], results["portfolio_values"])
-            return metrics.calculate_all_metrics()
+                if not results or not results.get("trades"):
+                    return {
+                        "sharpe_ratio": 0.0,
+                        "win_rate": 0.0,
+                        "avg_trade_return": 0.0,
+                        "max_drawdown": 1.0,
+                    }
+
+                # Calculate metrics with validation
+                metrics = PerformanceMetrics(
+                    results["trades"], results["portfolio_values"]
+                )
+                all_metrics = metrics.calculate_all_metrics()
+
+                # Handle NaN/Inf values
+                for key in [
+                    "sharpe_ratio",
+                    "win_rate",
+                    "avg_trade_return",
+                    "max_drawdown",
+                ]:
+                    if (
+                        key not in all_metrics
+                        or np.isnan(all_metrics[key])
+                        or np.isinf(all_metrics[key])
+                    ):
+                        all_metrics[key] = 0.0 if key != "max_drawdown" else 1.0
+
+                return all_metrics
+
+            except Exception as e:
+                logger.warning(f"Error in parameter evaluation: {e}")
+                return {
+                    "sharpe_ratio": 0.0,
+                    "win_rate": 0.0,
+                    "avg_trade_return": 0.0,
+                    "max_drawdown": 1.0,
+                }
 
         # Run optimization
         best_params, _ = optimizer.optimize(evaluate_params)
@@ -175,24 +243,56 @@ class WalkForwardOptimizer:
         Returns:
             Dict of performance metrics
         """
-        # Update strategy parameters
-        for name, value in parameters.items():
-            setattr(strategy, name, value)
+        if data.empty:
+            logger.warning("Empty data provided for parameter evaluation")
+            return {
+                "train_metrics": {"sharpe_ratio": 0.0, "win_rate": 0.0},
+                "test_metrics": {"sharpe_ratio": 0.0, "win_rate": 0.0},
+                "trades": [],
+                "portfolio_values": pd.Series(dtype=float),
+            }
 
-        # Run backtest
-        engine = BacktestEngine(strategy=strategy)
-        results = engine.run_backtest(data)
+        try:
+            # Update strategy parameters
+            for name, value in parameters.items():
+                setattr(strategy, name, value)
 
-        # Calculate metrics
-        metrics = PerformanceMetrics(results["trades"], results["portfolio_values"])
-        all_metrics = metrics.calculate_all_metrics()
+            # Run backtest
+            engine = BacktestEngine(strategy=strategy)
+            results = engine.run_backtest(data)
 
-        return {
-            "train_metrics": all_metrics,  # Store metrics under train_metrics key
-            "test_metrics": all_metrics,  # Store metrics under test_metrics key
-            "trades": results["trades"],
-            "portfolio_values": results["portfolio_values"],
-        }
+            if not results or not results.get("trades"):
+                return {
+                    "train_metrics": {"sharpe_ratio": 0.0, "win_rate": 0.0},
+                    "test_metrics": {"sharpe_ratio": 0.0, "win_rate": 0.0},
+                    "trades": [],
+                    "portfolio_values": pd.Series(dtype=float),
+                }
+
+            # Calculate metrics with validation
+            metrics = PerformanceMetrics(results["trades"], results["portfolio_values"])
+            all_metrics = metrics.calculate_all_metrics()
+
+            # Handle NaN/Inf values
+            for key in all_metrics:
+                if np.isnan(all_metrics[key]) or np.isinf(all_metrics[key]):
+                    all_metrics[key] = 0.0
+
+            return {
+                "train_metrics": all_metrics,
+                "test_metrics": all_metrics,
+                "trades": results["trades"],
+                "portfolio_values": results["portfolio_values"],
+            }
+
+        except Exception as e:
+            logger.warning(f"Error in parameter evaluation: {e}")
+            return {
+                "train_metrics": {"sharpe_ratio": 0.0, "win_rate": 0.0},
+                "test_metrics": {"sharpe_ratio": 0.0, "win_rate": 0.0},
+                "trades": [],
+                "portfolio_values": pd.Series(dtype=float),
+            }
 
     def _calculate_stability(
         self,
@@ -208,28 +308,63 @@ class WalkForwardOptimizer:
             Dict of stability metrics
         """
         if len(window_results) < 2:
-            return {}
+            return {
+                "sharpe_stability": 0.0,
+                "win_rate_stability": 0.0,
+                "parameter_stability": 0.0,
+            }
 
-        prev, curr = window_results[-2:]
+        try:
+            prev, curr = window_results[-2:]
 
-        # Calculate stability metrics
-        sharpe_stability = abs(curr["test_sharpe"] - prev["test_sharpe"]) / max(
-            abs(prev["test_sharpe"]), 1e-6
-        )
-        win_rate_stability = abs(curr["test_win_rate"] - prev["test_win_rate"])
-        param_stability = np.mean(
-            [
-                abs(curr["parameters"][p] - prev["parameters"][p])
-                / abs(prev["parameters"][p])
-                for p in curr["parameters"]
-            ]
-        )
+            # Calculate stability metrics with validation
+            prev_sharpe = float(prev.get("test_sharpe", 0.0))
+            curr_sharpe = float(curr.get("test_sharpe", 0.0))
+            if np.isnan(prev_sharpe) or np.isinf(prev_sharpe):
+                prev_sharpe = 0.0
+            if np.isnan(curr_sharpe) or np.isinf(curr_sharpe):
+                curr_sharpe = 0.0
 
-        return {
-            "sharpe_stability": sharpe_stability,
-            "win_rate_stability": win_rate_stability,
-            "parameter_stability": param_stability,
-        }
+            sharpe_stability = abs(curr_sharpe - prev_sharpe) / max(
+                abs(prev_sharpe), 1e-6
+            )
+
+            prev_win_rate = float(prev.get("test_win_rate", 0.0))
+            curr_win_rate = float(curr.get("test_win_rate", 0.0))
+            if np.isnan(prev_win_rate) or np.isinf(prev_win_rate):
+                prev_win_rate = 0.0
+            if np.isnan(curr_win_rate) or np.isinf(curr_win_rate):
+                curr_win_rate = 0.0
+
+            win_rate_stability = abs(curr_win_rate - prev_win_rate)
+
+            # Parameter stability with validation
+            param_changes = []
+            for p in curr.get("parameters", {}):
+                prev_val = float(prev.get("parameters", {}).get(p, 0.0))
+                curr_val = float(curr.get("parameters", {}).get(p, 0.0))
+                if np.isnan(prev_val) or np.isinf(prev_val):
+                    prev_val = 0.0
+                if np.isnan(curr_val) or np.isinf(curr_val):
+                    curr_val = 0.0
+                if abs(prev_val) > 1e-6:
+                    param_changes.append(abs(curr_val - prev_val) / abs(prev_val))
+
+            param_stability = np.mean(param_changes) if param_changes else 0.0
+
+            return {
+                "sharpe_stability": float(sharpe_stability),
+                "win_rate_stability": float(win_rate_stability),
+                "parameter_stability": float(param_stability),
+            }
+
+        except Exception as e:
+            logger.warning(f"Error calculating stability metrics: {e}")
+            return {
+                "sharpe_stability": 0.0,
+                "win_rate_stability": 0.0,
+                "parameter_stability": 0.0,
+            }
 
     def _analyze_wfo_results(
         self,

@@ -120,24 +120,52 @@ class MonteCarloSimulator:
         Returns:
             Dict of metrics
         """
-        # Calculate drawdown
-        peak = np.maximum.accumulate(equity_curve)
-        drawdown = (equity_curve - peak) / peak
-        max_drawdown = abs(drawdown.min())
+        if len(equity_curve) < 2 or len(returns) < 2:
+            return {
+                "max_drawdown": 0.0,
+                "sharpe_ratio": 0.0,
+                "total_return": 0.0,
+                "volatility": 0.0,
+            }
 
-        # Calculate Sharpe ratio
-        sharpe = np.sqrt(252) * np.mean(returns) / np.std(returns)
+        # Calculate drawdown with validation
+        try:
+            peak = np.maximum.accumulate(equity_curve)
+            drawdown = (equity_curve - peak) / peak
+            max_drawdown = abs(np.nanmin(drawdown))
+        except (ValueError, ZeroDivisionError):
+            max_drawdown = 0.0
 
-        # Calculate other metrics
-        total_return = (equity_curve[-1] / equity_curve[0]) - 1
-        volatility = np.std(returns) * np.sqrt(252)
+        # Calculate Sharpe ratio with validation
+        try:
+            returns_mean = np.nanmean(returns)
+            returns_std = np.nanstd(returns)
+            sharpe = (
+                np.sqrt(252) * returns_mean / returns_std if returns_std > 0 else 0.0
+            )
+        except (ValueError, ZeroDivisionError):
+            sharpe = 0.0
 
-        return {
+        # Calculate other metrics with validation
+        try:
+            total_return = (
+                (equity_curve[-1] / equity_curve[0]) - 1
+                if len(equity_curve) > 1
+                else 0.0
+            )
+            volatility = np.nanstd(returns) * np.sqrt(252) if len(returns) > 1 else 0.0
+        except (ValueError, ZeroDivisionError, IndexError):
+            total_return = volatility = 0.0
+
+        metrics = {
             "max_drawdown": max_drawdown,
             "sharpe_ratio": sharpe,
             "total_return": total_return,
             "volatility": volatility,
         }
+
+        # Replace any NaN or infinite values with 0.0
+        return {k: 0.0 if np.isnan(v) or np.isinf(v) else v for k, v in metrics.items()}
 
     def _calculate_max_consecutive_losses(self, returns: np.ndarray) -> int:
         """
@@ -184,20 +212,60 @@ class MonteCarloSimulator:
         Returns:
             Dict with analysis results
         """
-        # Convert lists to arrays for efficient computation
-        drawdowns = np.array(drawdowns)
-        sharpe_ratios = np.array(sharpe_ratios)
+        if (
+            not equity_curves
+            or not drawdowns
+            or not sharpe_ratios
+            or not max_consecutive_losses
+        ):
+            return {
+                "worst_case": {
+                    "drawdown": 0.0,
+                    "sharpe_ratio": 0.0,
+                    "consecutive_losses": 0,
+                },
+                "probabilities": {
+                    "drawdown_above_10pct": 0.0,
+                    "sharpe_below_1": 0.0,
+                    "consecutive_losses_above_5": 0.0,
+                },
+                "averages": {
+                    "drawdown": 0.0,
+                    "sharpe_ratio": 0.0,
+                    "consecutive_losses": 0,
+                },
+            }
+
+        # Convert lists to arrays and handle NaN/inf values
+        drawdowns = np.array(
+            [0.0 if np.isnan(x) or np.isinf(x) else x for x in drawdowns]
+        )
+        sharpe_ratios = np.array(
+            [0.0 if np.isnan(x) or np.isinf(x) else x for x in sharpe_ratios]
+        )
         max_consecutive_losses = np.array(max_consecutive_losses)
 
-        # Calculate worst-case metrics
-        worst_drawdown = np.percentile(drawdowns, 99)  # 99th percentile worst drawdown
-        worst_sharpe = np.percentile(sharpe_ratios, 1)  # 1st percentile worst Sharpe
-        worst_consecutive_losses = np.max(max_consecutive_losses)
+        # Calculate worst-case metrics with validation
+        worst_drawdown = np.percentile(drawdowns, 99) if len(drawdowns) > 0 else 0.0
+        worst_sharpe = (
+            np.percentile(sharpe_ratios, 1) if len(sharpe_ratios) > 0 else 0.0
+        )
+        worst_consecutive_losses = (
+            np.max(max_consecutive_losses) if len(max_consecutive_losses) > 0 else 0
+        )
 
-        # Calculate probabilities
-        prob_drawdown_above_10 = np.mean(drawdowns > 0.10)
-        prob_sharpe_below_1 = np.mean(sharpe_ratios < 1.0)
-        prob_consecutive_losses_above_5 = np.mean(max_consecutive_losses > 5)
+        # Calculate probabilities with validation
+        prob_drawdown_above_10 = (
+            np.mean(drawdowns > 0.10) if len(drawdowns) > 0 else 0.0
+        )
+        prob_sharpe_below_1 = (
+            np.mean(sharpe_ratios < 1.0) if len(sharpe_ratios) > 0 else 0.0
+        )
+        prob_consecutive_losses_above_5 = (
+            np.mean(max_consecutive_losses > 5)
+            if len(max_consecutive_losses) > 0
+            else 0.0
+        )
 
         return {
             "worst_case": {
@@ -211,9 +279,9 @@ class MonteCarloSimulator:
                 "consecutive_losses_above_5": prob_consecutive_losses_above_5,
             },
             "averages": {
-                "drawdown": np.mean(drawdowns),
-                "sharpe_ratio": np.mean(sharpe_ratios),
-                "consecutive_losses": np.mean(max_consecutive_losses),
+                "drawdown": np.nanmean(drawdowns),
+                "sharpe_ratio": np.nanmean(sharpe_ratios),
+                "consecutive_losses": np.nanmean(max_consecutive_losses),
             },
         }
 

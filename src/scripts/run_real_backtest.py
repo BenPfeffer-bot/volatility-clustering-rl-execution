@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 import logging
 from datetime import datetime, timedelta
 import torch
+import json
 
 # Add project root to path
 sys.path.append(
@@ -20,7 +21,7 @@ sys.path.append(
 
 from src.backtesting.strategies.institutional import EnhancedInstitutionalStrategy
 from src.backtesting.experiments import ExperimentManager
-from src.config.paths import PROCESSED_DIR, BACKTESTS_DIR
+from src.config.paths import PROCESSED_DIR, BACKTESTS_DIR, MODEL_WEIGHTS_DIR
 from src.utils.log_utils import setup_logging
 from src.models.tcn_impact import MarketImpactTCN, MarketImpactPredictor
 from src.data.process_features import FeatureEngineering
@@ -104,6 +105,77 @@ def load_stock_data(
     return data
 
 
+def save_model_checkpoint(
+    model: MarketImpactPredictor,
+    symbol: str,
+    window_start: str,
+    metrics: Dict,
+    output_dir: Path,
+) -> None:
+    """
+    Save model checkpoint with performance metrics.
+
+    Args:
+        model: Trained model instance
+        symbol: Stock symbol
+        window_start: Start date of the window
+        metrics: Performance metrics
+        output_dir: Output directory
+    """
+    # Create model directory
+    model_dir = output_dir / "models" / symbol
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save model weights
+    model_path = model_dir / f"tcn_{window_start}.pt"
+    model.save_model(str(model_path))
+
+    # Save metrics
+    metrics_path = model_dir / f"metrics_{window_start}.json"
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=4)
+
+    logger.info(f"Saved model checkpoint for {symbol} at {window_start}")
+
+
+def load_model_checkpoint(
+    symbol: str,
+    window_start: str,
+    output_dir: Path,
+) -> tuple[Optional[MarketImpactPredictor], Optional[Dict]]:
+    """
+    Load model checkpoint and metrics.
+
+    Args:
+        symbol: Stock symbol
+        window_start: Start date of the window
+        output_dir: Output directory
+
+    Returns:
+        Tuple of (model, metrics) if found, else (None, None)
+    """
+    model_dir = output_dir / "models" / symbol
+    model_path = model_dir / f"tcn_{window_start}.pt"
+    metrics_path = model_dir / f"metrics_{window_start}.json"
+
+    if not model_path.exists() or not metrics_path.exists():
+        return None, None
+
+    try:
+        # Load model
+        model = MarketImpactPredictor()
+        model.load_model(str(model_path))
+
+        # Load metrics
+        with open(metrics_path, "r") as f:
+            metrics = json.load(f)
+
+        return model, metrics
+    except Exception as e:
+        logger.error(f"Error loading checkpoint: {str(e)}")
+        return None, None
+
+
 def run_backtest_on_symbol(
     symbol: str,
     initial_capital: float = 1_000_000,
@@ -161,20 +233,88 @@ def run_backtest_on_symbol(
         max_drawdown_limit=0.04,
     )
 
+    # Track model performance across windows
+    model_performance_history = []
+
+    # Run walk-forward optimization with model persistence
+    logger.info(f"Running walk-forward optimization for {symbol}...")
+
+    # Convert string time windows to days
+    train_window_days = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}[
+        validation_config["wfo"]["train_window"]
+    ]
+
+    test_window_days = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}[
+        validation_config["wfo"]["test_window"]
+    ]
+
+    # Create rolling windows using days
+    window_size = pd.Timedelta(days=train_window_days)
+    test_size = pd.Timedelta(days=test_window_days)
+
+    start_dates = pd.date_range(
+        data.index[0], data.index[-1] - test_size, freq=test_size
+    )
+
+    for window_start in start_dates:
+        window_end = window_start + window_size
+        test_end = window_end + test_size
+
+        # Get window data
+        train_data = data[window_start:window_end]
+        test_data = data[window_end:test_end]
+
+        # Try to load existing model checkpoint
+        saved_model, saved_metrics = load_model_checkpoint(
+            symbol,
+            window_start.strftime("%Y%m%d"),
+            output_dir,
+        )
+
+        if saved_model is not None:
+            logger.info(f"Loading saved model for window {window_start}")
+            tcn_model = saved_model
+            model_performance_history.append(saved_metrics)
+        else:
+            # Train new model
+            logger.info(f"Training new model for window {window_start}")
+            tcn_model.train(train_df=train_data, epochs=25)
+
+            # Evaluate model
+            train_mse = tcn_model.evaluate(train_data)
+            test_mse = tcn_model.evaluate(test_data)
+
+            # Save checkpoint
+            metrics = {
+                "window_start": window_start.strftime("%Y%m%d"),
+                "train_mse": train_mse,
+                "test_mse": test_mse,
+                "timestamp": datetime.now().isoformat(),
+            }
+            save_model_checkpoint(
+                tcn_model, symbol, window_start.strftime("%Y%m%d"), metrics, output_dir
+            )
+            model_performance_history.append(metrics)
+
+        # Update market impact predictions
+        train_data["market_impact_pred"] = tcn_model.predict(train_data)
+        test_data["market_impact_pred"] = tcn_model.predict(test_data)
+
     # Run comprehensive analysis
-    logger.info(f"Running backtest for {symbol}...")
+    logger.info(f"Running comprehensive analysis for {symbol}...")
     results = experiment_mgr.run_comprehensive_analysis(
         strategy=strategy,
         data=data,
         parameter_ranges=bayesian_optimizer.param_bounds,
     )
 
-    # Generate and save detailed report
-    report = experiment_mgr.generate_detailed_report()
-    report_path = output_dir / symbol / "detailed_report.txt"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(report_path, "w") as f:
-        f.write(report)
+    # Add model performance history to results
+    results["model_performance"] = {
+        "history": model_performance_history,
+        "avg_train_mse": np.mean([m["train_mse"] for m in model_performance_history]),
+        "avg_test_mse": np.mean([m["test_mse"] for m in model_performance_history]),
+        "mse_stability": np.std([m["test_mse"] for m in model_performance_history]),
+    }
 
     return results
 
@@ -228,6 +368,9 @@ def run_multi_symbol_backtest(
         },
     }
 
+    # Track overall model performance
+    overall_model_performance = {}
+
     # Run backtests with enhanced validation
     results = {}
     for symbol in symbols:
@@ -242,6 +385,9 @@ def run_multi_symbol_backtest(
             )
             results[symbol] = symbol_results
 
+            # Track model performance
+            overall_model_performance[symbol] = symbol_results["model_performance"]
+
             # Log progress with enhanced metrics
             logger.info(f"Completed backtest for {symbol}")
 
@@ -250,6 +396,7 @@ def run_multi_symbol_backtest(
                 "performance_metrics", {}
             )
             validation_metrics = symbol_results.get("validation", {})
+            model_metrics = symbol_results["model_performance"]
 
             logger.info(f"{symbol} Results:")
             logger.info(f"  Total Return: {perf_metrics.get('total_return', 0):.2%}")
@@ -261,10 +408,14 @@ def run_multi_symbol_backtest(
             logger.info(
                 f"  MC VaR (95%): {validation_metrics.get('monte_carlo_var', 0):.2%}"
             )
+            logger.info(f"  Avg Model MSE: {model_metrics['avg_test_mse']:.6f}")
 
         except Exception as e:
             logger.error(f"Error running backtest for {symbol}: {str(e)}")
             continue
+
+    # Add model performance to results
+    results["overall_model_performance"] = overall_model_performance
 
     # Generate enhanced summary report
     generate_summary_report(results, output_dir, validation_config)
@@ -272,80 +423,96 @@ def run_multi_symbol_backtest(
     return results
 
 
-def generate_summary_report(
-    results: Dict[str, Dict], output_dir: Path, validation_config: Dict
-) -> None:
-    """Generate summary report comparing performance across symbols."""
+def generate_summary_report(results, output_dir, validation_config):
+    """Generate a summary report of backtest results across all symbols."""
     summary_data = []
-
     for symbol, result in results.items():
+        if symbol == "overall_model_performance":
+            continue
+
+        # Extract metrics from the correct nested structure
         perf_metrics = result.get("performance", {}).get("performance_metrics", {})
-        risk_metrics = result.get("risk_monitoring", {})
         validation_metrics = result.get("validation", {})
+        model_metrics = result.get("model_performance", {})
 
         summary_data.append(
             {
                 "Symbol": symbol,
-                "Total Return": perf_metrics.get("total_return", 0),
-                "Sharpe Ratio": perf_metrics.get("sharpe_ratio", 0),
-                "Win Rate": perf_metrics.get("win_rate", 0),
-                "Volatility": perf_metrics.get("volatility", 0),
-                "Max Drawdown": risk_metrics.get("max_drawdown", 0)
-                if isinstance(risk_metrics, dict)
-                else 0,
-                "Total Trades": perf_metrics.get("total_trades", 0),
-                "OOS Performance Ratio": validation_metrics.get(
-                    "oos_performance_ratio", 0
-                ),
-                "MC VaR (95%)": validation_metrics.get("monte_carlo_var", 0),
+                "Total_Return": perf_metrics.get("total_return", 0) * 100,
+                "Sharpe_Ratio": perf_metrics.get("sharpe_ratio", 0),
+                "Win_Rate": perf_metrics.get("win_rate", 0) * 100,
+                "OOS_Performance": validation_metrics.get("oos_performance_ratio", 0),
+                "VaR_95": validation_metrics.get("monte_carlo_var", 0) * 100,
+                "MSE_Stability": model_metrics.get("mse_stability", 0),
             }
         )
 
-    # Create summary DataFrame
     summary_df = pd.DataFrame(summary_data)
-    summary_df.sort_values("Sharpe Ratio", ascending=False, inplace=True)
 
-    # Save summary
-    summary_path = output_dir / "backtest_summary.csv"
-    summary_df.to_csv(summary_path, index=False)
+    # Handle empty or all-NaN cases
+    if summary_df.empty:
+        logger.warning("No valid results to generate summary report")
+        return
 
-    # Generate text report
-    report = ["Multi-Symbol Backtest Summary", "=" * 50, ""]
+    # Replace NaN with 0 for numerical comparisons
+    summary_df = summary_df.fillna(0)
 
-    # Overall statistics
-    report.extend(
-        [
-            "Overall Statistics:",
-            f"Total Symbols Tested: {len(results)}",
-            f"Average Sharpe Ratio: {summary_df['Sharpe Ratio'].mean():.2f}",
-            f"Average Win Rate: {summary_df['Win Rate'].mean():.2%}",
-            f"Average Return: {summary_df['Total Return'].mean():.2%}",
-            "",
-            "Top 5 Performing Symbols (by Sharpe):",
-            "-----------------------------------",
-        ]
+    # Find best performing metrics with validation
+    best_return_symbol = (
+        summary_df.loc[summary_df["Total_Return"].idxmax(), "Symbol"]
+        if not summary_df["Total_Return"].empty
+        else "None"
+    )
+    best_sharpe_symbol = (
+        summary_df.loc[summary_df["Sharpe_Ratio"].idxmax(), "Symbol"]
+        if not summary_df["Sharpe_Ratio"].empty
+        else "None"
+    )
+    most_stable_symbol = (
+        summary_df.loc[summary_df["MSE_Stability"].idxmin(), "Symbol"]
+        if not summary_df["MSE_Stability"].empty
+        else "None"
     )
 
-    # Add top 5 symbols
-    for _, row in summary_df.head().iterrows():
-        report.append(
-            f"{row['Symbol']}:"
-            f" Sharpe={row['Sharpe Ratio']:.2f},"
-            f" Return={row['Total Return']:.2%},"
-            f" Win Rate={row['Win Rate']:.2%}"
-        )
+    # Generate summary text
+    summary_text = [
+        "Backtest Summary Report",
+        "=====================",
+        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Symbols Tested: {', '.join(symbol for symbol in results.keys() if symbol != 'overall_model_performance')}",
+        "",
+        "Best Performers:",
+        f"Best Return: {best_return_symbol} ({summary_df.loc[summary_df['Total_Return'].idxmax(), 'Total_Return']:.2f}%)",
+        f"Best Sharpe: {best_sharpe_symbol} ({summary_df.loc[summary_df['Sharpe_Ratio'].idxmax(), 'Sharpe_Ratio']:.2f})",
+        f"Most Stable Model: {most_stable_symbol}",
+        "",
+        "Average Performance Metrics:",
+        f"Avg Return: {summary_df['Total_Return'].mean():.2f}%",
+        f"Avg Sharpe: {summary_df['Sharpe_Ratio'].mean():.2f}",
+        f"Avg Win Rate: {summary_df['Win_Rate'].mean():.2f}%",
+        f"Avg OOS Performance: {summary_df['OOS_Performance'].mean():.2f}",
+        "",
+        "Risk Metrics:",
+        f"Avg VaR (95%): {summary_df['VaR_95'].mean():.2f}%",
+        f"Worst Return: {summary_df['Total_Return'].min():.2f}%",
+        "",
+        "Detailed Results:",
+        summary_df.to_string(),
+    ]
 
-    # Save text report
-    report_path = output_dir / "backtest_summary.txt"
-    with open(report_path, "w") as f:
-        f.write("\n".join(report))
+    # Save summary report
+    summary_path = os.path.join(output_dir, "summary_report.txt")
+    with open(summary_path, "w") as f:
+        f.write("\n".join(summary_text))
+
+    logger.info(f"Summary report generated at {summary_path}")
 
 
 if __name__ == "__main__":
     # Run backtest on all available symbols with reference interval
     results = run_multi_symbol_backtest(
         ["AAPL"],  # Test with AAPL first
-        interval="1W",  # Use last 1 month of data
+        interval="3M",  # Use last 1 month of data
     )
     logger.info(
         "Completed all backtests. Check the output directory for detailed results."

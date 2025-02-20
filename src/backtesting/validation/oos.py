@@ -330,3 +330,56 @@ class OutOfSampleTester:
                 report.append("- Excessive performance degradation (>30%)")
 
         return "\n".join(report)
+
+    def calculate_oos_ratio(self, train_metrics: Dict, test_metrics: Dict) -> float:
+        """Calculate out-of-sample performance ratio."""
+        try:
+            # Extract key metrics with validation
+            train_sharpe = float(train_metrics.get("sharpe_ratio", 0.0))
+            test_sharpe = float(test_metrics.get("sharpe_ratio", 0.0))
+            train_return = float(train_metrics.get("total_return", 0.0))
+            test_return = float(test_metrics.get("total_return", 0.0))
+
+            # Handle NaN/Inf values
+            if (
+                np.isnan(train_sharpe)
+                or np.isinf(train_sharpe)
+                or np.isnan(test_sharpe)
+                or np.isinf(test_sharpe)
+            ):
+                logger.warning("Invalid Sharpe ratios detected in OOS calculation")
+                return 0.0
+
+            if (
+                np.isnan(train_return)
+                or np.isinf(train_return)
+                or np.isnan(test_return)
+                or np.isinf(test_return)
+            ):
+                logger.warning("Invalid returns detected in OOS calculation")
+                return 0.0
+
+            # Calculate performance ratio with validation
+            if abs(train_sharpe) < 1e-6 or abs(train_return) < 1e-6:
+                logger.warning(
+                    "Training metrics too close to zero for meaningful OOS ratio"
+                )
+                return 0.0
+
+            # Calculate composite OOS ratio
+            sharpe_ratio = test_sharpe / train_sharpe if train_sharpe != 0 else 0.0
+            return_ratio = test_return / train_return if train_return != 0 else 0.0
+
+            # Weighted average of Sharpe and return ratios
+            oos_ratio = 0.7 * sharpe_ratio + 0.3 * return_ratio
+
+            # Validate final ratio
+            if np.isnan(oos_ratio) or np.isinf(oos_ratio):
+                return 0.0
+
+            # Cap extreme values
+            return max(min(oos_ratio, 2.0), 0.0)
+
+        except Exception as e:
+            logger.error(f"Error calculating OOS ratio: {e}")
+            return 0.0

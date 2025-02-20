@@ -9,6 +9,7 @@ from scipy.stats import norm
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel
 from src.utils.log_utils import setup_logging
+from bayes_opt import BayesianOptimization
 
 logger = setup_logging(__name__)
 
@@ -35,18 +36,18 @@ class BayesianOptimizer:
 
         # Adjust kernel parameters for better convergence
         n_params = len(param_bounds)
-        length_scales = [10.0] * n_params  # More reasonable starting length scales
-        kernel = ConstantKernel(1.0, constant_value_bounds=(0.1, 10.0)) * RBF(
+        length_scales = [5.0] * n_params  # More moderate starting length scales
+        kernel = ConstantKernel(2.0, constant_value_bounds=(0.001, 1000.0)) * RBF(
             length_scales,
-            length_scale_bounds=[(0.1, 1000.0)] * n_params,  # Reduced upper bound
+            length_scale_bounds=[(0.001, 1000.0)] * n_params,  # Much wider bounds
         )
 
         self.gp = GaussianProcessRegressor(
             kernel=kernel,
-            n_restarts_optimizer=10,  # Increased restarts
+            n_restarts_optimizer=50,  # Increased restarts for better optimization
             random_state=42,
-            normalize_y=True,  # Add normalization
-            alpha=1e-6,  # Add small noise
+            normalize_y=True,
+            alpha=1e-3,  # Increased noise term for better stability
         )
         self.X_samples = []
         self.y_samples = []
@@ -238,3 +239,21 @@ class BayesianOptimizer:
 
         except ImportError:
             logger.warning("Matplotlib not available for plotting")
+
+    def create_optimizer(self, param_space, n_initial_points=5):
+        """Create Bayesian optimizer with adjusted kernel parameters."""
+        kernel = ConstantKernel(
+            constant_value=1.0, constant_value_bounds=(0.01, 100.0)
+        ) * RBF(
+            length_scale=[1.0] * len(param_space), length_scale_bounds=(0.01, 100.0)
+        )
+
+        optimizer = BayesianOptimization(
+            f=None,
+            pbounds=param_space,
+            random_state=self.random_state,
+            verbose=2,
+            kernel=kernel,
+            n_init=n_initial_points,
+        )
+        return optimizer
