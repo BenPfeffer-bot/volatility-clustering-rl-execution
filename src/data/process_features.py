@@ -411,24 +411,24 @@ if __name__ == "__main__":
     start_time = time.time()
 
     # Process features for AAPL first as a test
-    # ticker = "AAPL"
-    for ticker in DJ_TITANS_50_TICKER:
-        try:
-            logger.info(f"==========================================")
-            logger.info(f"Starting feature engineering for {ticker}")
-            logger.info(f"==========================================")
+    ticker = "AAPL"
+    # for ticker in DJ_TITANS_50_TICKER:
+    try:
+        logger.info(f"==========================================")
+        logger.info(f"Starting feature engineering for {ticker}")
+        logger.info(f"==========================================")
 
-            fe = FeatureEngineering(ticker)
-            fe.df = fe.load_data(ticker)
-            processed_df = fe.process_features()
-            fe.validate_processed_features()
-            fe.save_features()
+        fe = FeatureEngineering(ticker)
+        fe.df = fe.load_data(ticker)
+        processed_df = fe.process_features()
+        fe.validate_processed_features()
+        fe.save_features()
 
-            logger.info(f"Successfully processed {ticker}")
-            logger.info(f"Time taken: {time.time() - start_time:.2f} seconds")
-            logger.info(f"Output shape: {processed_df.shape}")
-            logger.info(f"==========================================")
+        logger.info(f"Successfully processed {ticker}")
+        logger.info(f"Time taken: {time.time() - start_time:.2f} seconds")
+        logger.info(f"Output shape: {processed_df.shape}")
+        logger.info(f"==========================================")
 
-        except Exception as e:
-            logger.error(f"Error processing {ticker}: {str(e)}")
-            logger.error("Stack trace:", exc_info=True)
+    except Exception as e:
+        logger.error(f"Error processing {ticker}: {str(e)}")
+        logger.error("Stack trace:", exc_info=True)

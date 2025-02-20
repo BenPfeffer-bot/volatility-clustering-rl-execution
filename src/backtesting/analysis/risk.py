@@ -100,7 +100,12 @@ class RiskManager:
         """
         # Update peak value and drawdown
         self.peak_value = max(self.peak_value, portfolio_value)
-        self.current_drawdown = (self.peak_value - portfolio_value) / self.peak_value
+        if self.peak_value > 0:
+            self.current_drawdown = (
+                self.peak_value - portfolio_value
+            ) / self.peak_value
+        else:
+            self.current_drawdown = 0.0
 
         # Calculate risk metrics
         if len(returns) > 1:

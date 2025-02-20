@@ -22,10 +22,10 @@ class EnhancedInstitutionalStrategy(BaseStrategy):
     def __init__(
         self,
         vpin_threshold: float = 0.7,
-        min_holding_time: int = 10,  # minutes
-        max_holding_time: int = 30,  # minutes
-        stop_loss: float = 0.02,
-        take_profit: float = 0.0075,  # 0.75% target return
+        min_holding_time: int = 5,  # minutes
+        max_holding_time: int = 15,  # minutes
+        stop_loss: float = 0.01,  # Tighter 1% stop loss
+        take_profit: float = 0.005,  # 0.5% target return
         vol_window: int = 100,  # window for volatility calculation
     ):
         self.vpin_threshold = vpin_threshold
@@ -126,33 +126,33 @@ class EnhancedInstitutionalStrategy(BaseStrategy):
         if abs(signal) == 0:
             return 0.0
 
-        # More conservative base size
-        base_size = 0.5  # Start with 50% max position
+        # Ultra-conservative base size
+        base_size = 0.1  # Start with 10% max position
 
-        # Adjust for VPIN with more conservative scaling
-        vpin_factor = min(0.8 * data["vpin"] / self.vpin_threshold, 1.2)
+        # Adjust for VPIN with conservative scaling
+        vpin_factor = min(0.5 * data["vpin"] / self.vpin_threshold, 0.8)
 
-        # More conservative volatility adjustment
+        # Conservative volatility adjustment
         vol_factor = 1.0
         if "daily_volatility" in data:
-            vol_factor = 1.0 / (1.0 + 2.0 * data["daily_volatility"])
+            vol_factor = 1.0 / (1.0 + 5.0 * data["daily_volatility"])
 
-        # More conservative impact adjustment
+        # Conservative impact adjustment
         impact_factor = 1.0
         if "market_impact_pred" in data:
-            impact_factor = 1.0 / (1.0 + 2.0 * data["market_impact_pred"])
+            impact_factor = 1.0 / (1.0 + 5.0 * data["market_impact_pred"])
 
         # Volume-based adjustment
         volume_factor = 1.0
         if "volume" in data and "avg_volume" in data:
-            # Reduce size when volume is low
-            volume_factor = min(1.0, np.sqrt(data["volume"] / data["avg_volume"]))
+            # Significantly reduce size when volume is low
+            volume_factor = min(0.8, np.power(data["volume"] / data["avg_volume"], 0.3))
 
         # Calculate final size with all adjustments
         size = base_size * vpin_factor * vol_factor * impact_factor * volume_factor
 
-        # More conservative maximum position size
-        return min(size, 0.5)  # Cap at 50% of portfolio
+        # Ultra-conservative maximum position size
+        return min(size, 0.1)  # Cap at 10% of portfolio
 
     def calculate_regime(self, data: pd.DataFrame) -> str:
         """

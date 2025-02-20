@@ -172,7 +172,7 @@ class BacktestVisualizer:
         self,
         portfolio_values: pd.Series,
         trades: List[Trade],
-        drawdowns: pd.Series,
+        drawdowns: float,
         output_dir: Optional[Path] = None,
     ) -> Path:
         """
@@ -181,7 +181,7 @@ class BacktestVisualizer:
         Args:
             portfolio_values: Series of portfolio values
             trades: List of completed trades
-            drawdowns: Series of drawdown values
+            drawdowns: Maximum drawdown value
             output_dir: Optional directory for report output
 
         Returns:
@@ -194,9 +194,13 @@ class BacktestVisualizer:
         )
         report_dir.mkdir(parents=True, exist_ok=True)
 
+        # Calculate drawdown series
+        peak = portfolio_values.expanding().max()
+        drawdown_series = (portfolio_values - peak) / peak
+
         # Generate plots
         self.plot_equity_curve(
-            portfolio_values, drawdowns, report_dir / "equity_curve.png"
+            portfolio_values, drawdown_series, report_dir / "equity_curve.png"
         )
 
         self.plot_trade_analysis(trades, report_dir / "trade_analysis.png")

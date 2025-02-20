@@ -14,7 +14,7 @@ sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
-from src.config.paths import PROCESSED_DIR
+from src.config.paths import EXPERIMENTS_DIR
 from src.utils.log_utils import setup_logging
 
 logger = setup_logging(__name__)
@@ -94,7 +94,7 @@ def main():
     df = generate_test_data()
 
     # Save to processed directory
-    output_file = PROCESSED_DIR / "AAPL_features.csv"
+    output_file = EXPERIMENTS_DIR / "AAPL_features.csv"
     df.to_csv(output_file)
     logger.info(f"Test data saved to {output_file}")
 

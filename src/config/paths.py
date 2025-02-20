@@ -18,10 +18,10 @@ SRC_DIR = ROOT_DIR / "src"
 DATA_DIR = SRC_DIR / "data"
 RAW_DIR = DATAS_DIR / "raw"
 PROCESSED_DIR = DATAS_DIR / "processed"
+EXPERIMENTS_DIR = DATAS_DIR / "experiments"
 
 # OUTPUT DIRECTORIES
 SIGNALS_DIR = OUTPUT_DIR / "signals"
-FEATURES_DIR = OUTPUT_DIR / "features"
 MODELS_DIR = OUTPUT_DIR / "models"
 BACKTESTS_DIR = OUTPUT_DIR / "backtests"
 PLOTS_DIR = OUTPUT_DIR / "plots"
@@ -37,11 +37,11 @@ DIRS = [
     RAW_DIR,
     PROCESSED_DIR,
     SIGNALS_DIR,
-    FEATURES_DIR,
     MODELS_DIR,
     BACKTESTS_DIR,
     PLOTS_DIR,
     MODEL_WEIGHTS_DIR,
+    EXPERIMENTS_DIR,
 ]
 
 
@@ -50,6 +50,7 @@ def create_directories():
     for directory in DIRS:
         directory.mkdir(parents=True, exist_ok=True)
 
+    # Create directories when module is imported
 
-# Create directories when module is imported
+
 create_directories()

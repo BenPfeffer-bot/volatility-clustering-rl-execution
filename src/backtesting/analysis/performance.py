@@ -6,14 +6,15 @@ import numpy as np
 import pandas as pd
 from typing import List, Dict, Any
 from ..core.metrics import BacktestMetrics
+from ..strategies.base import Trade
 
 
 class PerformanceAnalyzer:
     """Analyzes trading performance and generates reports."""
 
-    def __init__(self):
+    def __init__(self, risk_free_rate: float = 0.02):  # 2% annual risk-free rate
         """Initialize the performance analyzer."""
-        pass
+        self.risk_free_rate = risk_free_rate
 
     def analyze_performance(self, trades, portfolio_values, market_data):
         """
@@ -36,7 +37,7 @@ class PerformanceAnalyzer:
             }
 
         # Calculate performance metrics
-        performance_metrics = self._calculate_performance_metrics(portfolio_values)
+        performance_metrics = self.calculate_metrics(portfolio_values, trades)
 
         # Calculate risk metrics
         risk_metrics = self._calculate_risk_metrics(portfolio_values)
@@ -54,28 +55,82 @@ class PerformanceAnalyzer:
             "market_impact_analysis": market_impact_analysis,
         }
 
-    def _calculate_performance_metrics(self, portfolio_values):
-        """
-        Calculate key performance metrics.
+    def calculate_metrics(
+        self, portfolio_values: pd.Series, trades: List[Trade]
+    ) -> Dict:
+        """Calculate performance metrics from portfolio values and trades."""
+        if len(portfolio_values) < 2:
+            return self._empty_metrics()
 
-        Args:
-            portfolio_values (pd.Series): Portfolio values over time
-
-        Returns:
-            Dict[str, float]: Performance metrics
-        """
+        # Calculate returns
         returns = portfolio_values.pct_change().dropna()
+        if len(returns) == 0:
+            return self._empty_metrics()
 
+        # Calculate basic metrics
         total_return = (portfolio_values.iloc[-1] / portfolio_values.iloc[0]) - 1
-        annualized_return = (1 + total_return) ** (252 / len(returns)) - 1
-        sharpe_ratio = (
-            np.sqrt(252) * returns.mean() / returns.std() if returns.std() != 0 else 0
-        )
+        volatility = returns.std() * np.sqrt(252)  # Annualized
+
+        # Calculate Sharpe ratio (avoid division by zero)
+        excess_returns = returns - self.risk_free_rate / 252
+        sharpe_ratio = 0.0
+        if volatility > 0:
+            sharpe_ratio = (excess_returns.mean() * 252) / volatility
+
+        # Calculate Sortino ratio
+        downside_returns = returns[returns < 0]
+        sortino_ratio = 0.0
+        if len(downside_returns) > 0:
+            downside_vol = np.sqrt(np.mean(downside_returns**2)) * np.sqrt(252)
+            if downside_vol > 0:
+                sortino_ratio = (excess_returns.mean() * 252) / downside_vol
+
+        # Calculate trade-based metrics
+        completed_trades = [t for t in trades if t.exit_time is not None]
+        win_rate = 0.0
+        avg_trade_return = 0.0
+        profit_factor = 0.0
+
+        if completed_trades:
+            winning_trades = [t for t in completed_trades if t.pnl > 0]
+            win_rate = len(winning_trades) / len(completed_trades)
+
+            total_profit = sum(t.pnl for t in winning_trades)
+            total_loss = abs(sum(t.pnl for t in completed_trades if t.pnl < 0))
+
+            avg_trade_return = sum(t.pnl for t in completed_trades) / len(
+                completed_trades
+            )
+
+            if total_loss > 0:
+                profit_factor = total_profit / total_loss
+            elif total_profit > 0:
+                profit_factor = float("inf")
+            else:
+                profit_factor = 0.0
 
         return {
             "total_return": total_return,
-            "annualized_return": annualized_return,
             "sharpe_ratio": sharpe_ratio,
+            "sortino_ratio": sortino_ratio,
+            "volatility": volatility,
+            "win_rate": win_rate,
+            "avg_trade_return": avg_trade_return,
+            "profit_factor": profit_factor,
+            "total_trades": len(completed_trades),
+        }
+
+    def _empty_metrics(self) -> Dict:
+        """Return empty metrics dictionary with default values."""
+        return {
+            "total_return": 0.0,
+            "sharpe_ratio": 0.0,
+            "sortino_ratio": 0.0,
+            "volatility": 0.0,
+            "win_rate": 0.0,
+            "avg_trade_return": 0.0,
+            "profit_factor": 0.0,
+            "total_trades": 0,
         }
 
     def _calculate_risk_metrics(self, portfolio_values):

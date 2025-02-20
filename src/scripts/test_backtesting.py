@@ -14,7 +14,7 @@ sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
-from src.config.paths import PROCESSED_DIR, OUTPUT_DIR
+from src.config.paths import PROCESSED_DIR, OUTPUT_DIR, RAW_DIR
 from src.backtesting.strategies.institutional import EnhancedInstitutionalStrategy
 from src.backtesting.performance.comparison import StrategyComparison
 from src.backtesting.performance.metrics import PerformanceMetrics

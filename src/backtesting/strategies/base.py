@@ -7,7 +7,7 @@ Defines core Trade dataclass and BaseStrategy abstract class.
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 import pandas as pd
 from abc import ABC, abstractmethod
 
@@ -142,6 +142,10 @@ class BaseStrategy(ABC):
     Enforces implementation of core trading methods.
     """
 
+    def __init__(self):
+        self.trades = []  # Store completed trades
+        self.active_trade = None  # Store current active trade
+
     @abstractmethod
     def generate_signals(self, data: pd.DataFrame) -> pd.Series:
         """
@@ -205,3 +209,27 @@ class BaseStrategy(ABC):
             performance_metrics: Dictionary of performance metrics
         """
         pass
+
+    def on_trade_opened(self, trade: Trade) -> None:
+        """
+        Handle trade opening event.
+
+        Args:
+            trade: New trade that was opened
+        """
+        self.active_trade = trade
+
+    def on_trade_completed(self, trade: Trade) -> None:
+        """
+        Handle trade completion event.
+
+        Args:
+            trade: Trade that was completed
+        """
+        if trade == self.active_trade:
+            self.active_trade = None
+        self.trades.append(trade)
+
+    def get_trade_history(self) -> List[Trade]:
+        """Get list of completed trades."""
+        return self.trades

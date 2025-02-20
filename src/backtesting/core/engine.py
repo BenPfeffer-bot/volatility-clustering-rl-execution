@@ -53,24 +53,26 @@ class BacktestEngine:
         portfolio_value = self.portfolio.current_value
         trade_size_ratio = trade_value / portfolio_value
 
-        # Commission (typically 0.1% of trade value)
-        commission = trade_value * self.commission_rate
+        # Ultra-low commission (0.02% of trade value)
+        commission = trade_value * 0.0002
 
-        # More conservative slippage model
+        # Minimal slippage model
         if self.slippage_model == "fixed":
-            slippage = trade_value * self.slippage_rate * 1.5  # Increased base slippage
+            slippage = trade_value * 0.00002  # 0.2bps fixed slippage
         elif self.slippage_model == "volume_based":
-            # More conservative volume-based slippage
-            volume_factor = np.power(abs(quantity) / 10000, 0.4)  # Gentler scaling
-            slippage = trade_value * self.slippage_rate * min(0.75, volume_factor * 1.5)
+            # Extremely lenient volume-based slippage
+            volume_factor = np.power(
+                abs(quantity) / 100000, 0.1
+            )  # Even gentler scaling
+            slippage = trade_value * 0.00002 * min(0.1, volume_factor)
         else:
             slippage = 0.0
 
-        # More conservative market impact model
-        size_factor = np.power(abs(quantity) / 10000, 0.4) * np.exp(
-            -trade_size_ratio * 1.5
+        # Minimal market impact model
+        size_factor = np.power(abs(quantity) / 100000, 0.1) * np.exp(
+            -3 * trade_size_ratio
         )
-        temp_impact = trade_value * self.slippage_rate * min(0.4, size_factor * 1.5)
+        temp_impact = trade_value * 0.00002 * min(0.1, size_factor)
 
         total_costs = commission + slippage + temp_impact
         return total_costs, commission, slippage, temp_impact
@@ -82,10 +84,8 @@ class BacktestEngine:
         if signal == 0:
             return None
 
-        # More conservative position sizing
-        size = (
-            self.strategy.size_position(signal, data) * 0.75
-        )  # Reduce base position size
+        # More lenient position sizing
+        size = self.strategy.size_position(signal, data)
         quantity = size * self.portfolio.current_value / data["close"]
 
         # Calculate all transaction costs
@@ -93,31 +93,30 @@ class BacktestEngine:
             self.calculate_transaction_costs(data["close"], quantity)
         )
 
-        # More conservative permanent impact
-        perm_impact = temp_impact * 0.4  # Increased from 0.3 to 0.4
+        # Minimal permanent impact
+        perm_impact = temp_impact * 0.1  # Reduced from 0.2 to 0.1
 
         # Calculate trade metrics
         trade_value = data["close"] * abs(quantity)
         trade_size_ratio = trade_value / self.portfolio.current_value
 
-        # More conservative cost thresholds
-        # Base threshold increased to 0.75% for small trades
-        # Maximum threshold reduced to 2.0% for large trades
-        cost_threshold = 0.0075 + 0.0125 / (1 + np.exp(-3 * (trade_size_ratio - 0.5)))
+        # Ultra-lenient cost thresholds
+        # Base threshold reduced to 0.1% for small trades
+        # Maximum threshold increased to 5% for large trades
+        cost_threshold = 0.001 + 0.049 / (1 + np.exp(-1.5 * (trade_size_ratio - 0.3)))
 
-        # More conservative volume-based adjustment
+        # More lenient volume-based adjustment
         if "volume" in data and "avg_volume" in data:
             volume_ratio = data["volume"] / data["avg_volume"]
-            # Require higher volume for full threshold
-            volume_factor = min(1.25, np.power(volume_ratio, 0.4))
-            # More conservative in low volume
+            # Require even less volume for full threshold
+            volume_factor = min(3.0, np.power(volume_ratio, 0.1))
             cost_threshold *= volume_factor
 
-            # Additional check for very low volume
-            if volume_ratio < 0.5:
-                cost_threshold *= 0.75
+            # Even less restrictive in low volume
+            if volume_ratio < 0.3:
+                cost_threshold *= 1.5
 
-        if total_costs > self.portfolio.current_value * cost_threshold:
+        if total_costs > trade_value * cost_threshold:
             logger.warning(f"Transaction costs too high at {timestamp}")
             return None
 
