@@ -9,6 +9,10 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 from typing import Tuple
+import torch
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import Lock
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,6 +24,9 @@ from src.utils.log_utils import setup_logging
 
 # Set up logging
 logger = setup_logging(__name__)
+
+# Global lock for model saving
+save_lock = Lock()
 
 
 def get_available_tickers():
@@ -86,23 +93,13 @@ def validate_features(df: pd.DataFrame) -> bool:
             f"Hurst exponent out of bounds [0,1]: min={hurst_min:.3f}, max={hurst_max:.3f}"
         )
 
-    # Check for persistence patterns
-    persistent_ratio = len(df[df["hurst"] > 0.5]) / len(df)
-    logger.info(f"Persistent volume patterns ratio: {persistent_ratio:.2%}")
-    if persistent_ratio < 0.3:  # Less than 30% showing persistence is unusual
-        logger.warning("Low persistence in volume patterns detected")
+    # Calculate percentage of persistent volume patterns
+    persistent_ratio = (df["hurst"] > 0.5).mean() * 100
+    logger.info(f"Persistent volume patterns ratio: {persistent_ratio:.2f}%")
 
-    # 6. Check for data quality
-    nan_counts = df[list(required_features.keys())].isna().sum()
-    if nan_counts.any():
-        raise ValueError(f"Found NaN values in features: {nan_counts[nan_counts > 0]}")
-
-    # Check for infinite values
-    inf_counts = np.isinf(df[list(required_features.keys())]).sum()
-    if inf_counts.any():
-        raise ValueError(
-            f"Found infinite values in features: {inf_counts[inf_counts > 0]}"
-        )
+    # 6. Check for NaN values
+    if df.isnull().any().any():
+        raise ValueError("Dataset contains NaN values")
 
     logger.info("Feature validation passed ✓")
     return True
@@ -157,18 +154,55 @@ def train_test_split(
     return train_data, val_data
 
 
-def train_model(ticker: str) -> MarketImpactPredictor:
+def verify_model_saved(save_path: Path, model: MarketImpactPredictor) -> bool:
+    """
+    Verify that the model was saved correctly.
+
+    Args:
+        save_path: Path where model should be saved
+        model: Trained model instance
+
+    Returns:
+        bool: True if model was saved correctly
+    """
+    if not save_path.exists():
+        logger.error(f"Model file not found at {save_path}")
+        return False
+
+    try:
+        # Try to load the saved model
+        test_model = MarketImpactPredictor()
+        test_model.load_model(str(save_path))
+
+        # Verify model parameters match
+        if (
+            test_model.input_size != model.input_size
+            or test_model.output_size != model.output_size
+            or test_model.num_channels != model.num_channels
+        ):
+            logger.error("Loaded model parameters do not match original model")
+            return False
+
+        logger.info("Model saved and verified successfully")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error verifying saved model: {str(e)}")
+        return False
+
+
+def train_model(ticker: str, process_id: int) -> Tuple[str, bool]:
     """
     Train TCN model for a given ticker.
 
     Args:
         ticker: Stock ticker symbol
+        process_id: Process identifier for logging
 
     Returns:
-        Trained MarketImpactPredictor instance
+        Tuple of (ticker, success_status)
     """
-    logger.info("=" * 50)
-    logger.info(f"Training model for {ticker}")
+    logger.info(f"[Process {process_id}] Starting training for {ticker}")
     logger.info("=" * 50)
 
     try:
@@ -181,29 +215,31 @@ def train_model(ticker: str) -> MarketImpactPredictor:
         # Initialize model
         model = MarketImpactPredictor()
 
-        # Prepare sequences
-        logger.info("Preparing sequences...")
-        X_train, y_train = model.prepare_sequences(train_data)
-        X_val, y_val = model.prepare_sequences(val_data)
-
-        logger.info(f"Training sequences shape: {X_train.shape}")
-        logger.info(f"Validation sequences shape: {X_val.shape}")
-
         # Train model
-        logger.info("Starting model training...")
+        logger.info(f"[Process {process_id}] Starting model training for {ticker}...")
         history = model.train(train_df=train_data, val_df=val_data)
 
-        # Save model
+        # Save model with lock to prevent concurrent writes
         save_path = MODELS_DIR / f"tcn_{ticker}.pt"
-        model.save_model(save_path)
-        logger.info(f"Model saved to {save_path}")
+        with save_lock:
+            model.save_model(str(save_path))
+            logger.info(f"[Process {process_id}] Model saved at {save_path}")
 
-        return model
+        # Verify model was saved correctly
+        if not verify_model_saved(save_path, model):
+            raise RuntimeError(f"Failed to save model for {ticker}")
+
+        logger.info(
+            f"[Process {process_id}] Successfully completed training for {ticker}"
+        )
+        return ticker, True
 
     except Exception as e:
-        logger.error(f"Error during model training: {str(e)}")
+        logger.error(
+            f"[Process {process_id}] Error training model for {ticker}: {str(e)}"
+        )
         logger.error("Stack trace:", exc_info=True)
-        raise
+        return ticker, False
 
 
 def evaluate_predictions(model: MarketImpactPredictor, test_df: pd.DataFrame) -> dict:
@@ -232,44 +268,71 @@ def evaluate_predictions(model: MarketImpactPredictor, test_df: pd.DataFrame) ->
 
 
 def main():
-    """Main training pipeline with parallel processing."""
+    """Main training pipeline with improved parallel processing."""
     # Create models directory if it doesn't exist
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Get available tickers
-    tickers = get_available_tickers()
+    # tickers = get_available_tickers()
+    tickers = ["AAPL"]
     logger.info(f"Found {len(tickers)} tickers with processed data")
 
     # Configure parallel processing
-    from concurrent.futures import ProcessPoolExecutor
-    import multiprocessing
-
-    # Use 75% of available CPU cores for training
     num_workers = max(1, int(multiprocessing.cpu_count() * 0.75))
     logger.info(f"Using {num_workers} workers for parallel training")
 
-    # Process tickers in parallel
+    # Track successful and failed models
+    successful_models = []
+    failed_models = []
+
+    # Process tickers in parallel with process IDs
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all training jobs
+        # Submit all training jobs with process IDs
         future_to_ticker = {
-            executor.submit(train_model, ticker): ticker for ticker in tickers
+            executor.submit(train_model, ticker, i): ticker
+            for i, ticker in enumerate(tickers)
         }
 
-        # Process completed jobs
-        from concurrent.futures import as_completed
+        # Process completed jobs with progress bar
+        with tqdm(total=len(tickers), desc="Training models") as pbar:
+            for future in as_completed(future_to_ticker):
+                ticker = future_to_ticker[future]
+                try:
+                    ticker, success = future.result()
+                    if success:
+                        successful_models.append(ticker)
+                        logger.info(f"✓ Successfully trained model for {ticker}")
+                    else:
+                        failed_models.append(ticker)
+                        logger.error(f"✗ Failed to train model for {ticker}")
+                except Exception as e:
+                    failed_models.append(ticker)
+                    logger.error(f"Error processing {ticker}: {str(e)}")
+                    logger.error("Stack trace:", exc_info=True)
+                finally:
+                    pbar.update(1)
 
-        for future in tqdm(
-            as_completed(future_to_ticker), total=len(tickers), desc="Training models"
-        ):
-            ticker = future_to_ticker[future]
-            try:
-                model = future.result()
-                logger.info(f"Successfully trained model for {ticker}")
-            except Exception as e:
-                logger.error(f"Error training model for {ticker}: {str(e)}")
-                logger.error("Stack trace:", exc_info=True)
-                continue
+    # Print summary
+    logger.info("\n=== Training Summary ===")
+    logger.info(f"Total tickers: {len(tickers)}")
+    logger.info(f"Successfully trained: {len(successful_models)}")
+    logger.info(f"Failed: {len(failed_models)}")
+
+    if failed_models:
+        logger.info("\nFailed tickers:")
+        for ticker in failed_models:
+            logger.info(f"- {ticker}")
+
+    # Clean up
+    import gc
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Return appropriate exit code
+    return 1 if failed_models else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

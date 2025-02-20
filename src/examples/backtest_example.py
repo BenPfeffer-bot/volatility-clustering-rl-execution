@@ -20,7 +20,7 @@ sys.path.append(
 from src.data.process_features import FeatureEngineering
 from src.models.tcn_impact import MarketImpactPredictor
 from src.scripts.train_tcn import train_model
-from src.scripts.run_backtest import run_backtest
+from history.run_backtest import run_backtest
 from src.utils.log_utils import setup_logging
 from argparse import Namespace
 

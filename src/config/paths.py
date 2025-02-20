@@ -1,17 +1,18 @@
+"""
+Configuration file for project paths.
+"""
+
 import os
 from pathlib import Path
 
-
-ROOT_DIR = Path(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-)
+# Get project root directory
+ROOT_DIR = Path(__file__).parent.parent.parent
 
 # Storage Directories
 DATAS_DIR = ROOT_DIR / "db"
 LOGS_DIR = ROOT_DIR / "logs"
 OUTPUT_DIR = ROOT_DIR / "output"
 SRC_DIR = ROOT_DIR / "src"
-
 
 # RAW DATA DIRECTORIES
 DATA_DIR = SRC_DIR / "data"
@@ -24,7 +25,7 @@ FEATURES_DIR = OUTPUT_DIR / "features"
 MODELS_DIR = OUTPUT_DIR / "models"
 BACKTESTS_DIR = OUTPUT_DIR / "backtests"
 PLOTS_DIR = OUTPUT_DIR / "plots"
-
+MODEL_WEIGHTS_DIR = DATAS_DIR / "models" / "weights"
 
 # Create all directories
 DIRS = [
@@ -40,6 +41,7 @@ DIRS = [
     MODELS_DIR,
     BACKTESTS_DIR,
     PLOTS_DIR,
+    MODEL_WEIGHTS_DIR,
 ]
 
 
